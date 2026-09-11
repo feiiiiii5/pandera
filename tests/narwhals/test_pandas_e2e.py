@@ -703,6 +703,51 @@ def test_groupby_check_with_groups_filter():
     schema.validate(df)
 
 
+def test_groupby_check_scalar_keys():
+    """Callable groupby yielding scalar keys must not raise TypeError.
+
+    Mirrors the pandas-backend fix for #1235 (PR #2420): the narwhals port
+    of ``_format_groupby_input`` called ``len()``/``[0]`` on group keys,
+    which fails for scalar keys (e.g. ints). A plain-string ``groupby`` is
+    normalized to ``[groupby]`` in ``Check.__init__`` (1-tuple keys), so the
+    scalar-key shape is reached through a callable such as
+    ``lambda df: df.groupby("col")``.
+    """
+    df = pd.DataFrame({"group": [1, 1, 2, 2], "val": [10, 20, 30, 40]})
+
+    schema = pa.DataFrameSchema(
+        {
+            "group": pa.Column(int),
+            "val": pa.Column(
+                int,
+                pa.Check(
+                    lambda d: all(s.gt(0).all() for s in d.values()),
+                    groupby=lambda d: d.groupby("group"),
+                ),
+            ),
+        }
+    )
+    result = schema.validate(df)
+    assert isinstance(result, pd.DataFrame)
+
+    # Also test with groups filter on scalar keys
+    schema_with_groups = pa.DataFrameSchema(
+        {
+            "group": pa.Column(int),
+            "val": pa.Column(
+                int,
+                pa.Check(
+                    lambda d: all(s.gt(0).all() for s in d.values()),
+                    groupby=lambda d: d.groupby("group"),
+                    groups=[1],
+                ),
+            ),
+        }
+    )
+    result2 = schema_with_groups.validate(df)
+    assert isinstance(result2, pd.DataFrame)
+
+
 def test_hypothesis_check():
     """Hypothesis checks run through the native pandas hypothesis backend."""
     pytest.importorskip("scipy")
