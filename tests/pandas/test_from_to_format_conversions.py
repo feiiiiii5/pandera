@@ -328,3 +328,27 @@ def test_to_format(schema, from_fn, buf_cls):
 
     with pytest.raises(pa.errors.SchemaError):
         invalid_fn(df)
+
+
+def test_to_format_on_input_is_not_applied():
+    """
+    Test that `to_format` in an input annotation does not serialize the
+    argument before it reaches the function body.
+
+    See https://github.com/unionai-oss/pandera/issues/1942.
+    """
+
+    class InSchemaToFormat(InSchema):
+        class Config:
+            to_format = "dict"
+            to_format_kwargs = {"orient": "records"}
+
+    @pa.check_types
+    def fn(df: pa.typing.DataFrame[InSchemaToFormat]) -> float:
+        assert isinstance(df, pd.DataFrame)
+        return df["int_col"].mean()
+
+    assert fn(mock_dataframe()) == 1.0
+
+    with pytest.raises(pa.errors.SchemaError):
+        fn(invalid_input_dataframe())

@@ -709,6 +709,7 @@ def check_types(
         arg_value: Any,
         schema_model: BaseModel | None,
         annotation_info: AnnotationInfo,
+        is_return: bool = False,
     ) -> Any:
         if schema_model is None or (
             annotation_info.optional and arg_value is None
@@ -739,7 +740,7 @@ def check_types(
         )
 
         to_format = getattr(config, "to_format", None) if config else None
-        if data_container_type and to_format:
+        if is_return and data_container_type and to_format:
             arg_value = data_container_type.to_format(arg_value, config)
 
         return arg_value
@@ -747,13 +748,17 @@ def check_types(
     def _check_arg_value_against_union(
         arg_value: Any,
         union_child_nodes: list[_AnnotationInfoWithModelTree],
+        is_return: bool = False,
     ) -> Any:
         # Check if the arg value matches any of the children
         schema_errors = []
         for child in union_child_nodes:
             try:
                 return _check_arg_value_against_model(
-                    arg_value, child.dataframe_model, child.annotation_info
+                    arg_value,
+                    child.dataframe_model,
+                    child.annotation_info,
+                    is_return,
                 )
             except errors.SchemaError as e:
                 schema_errors.append(e)
@@ -772,6 +777,7 @@ def check_types(
     def _check_arg_value_against_tuple(
         arg_value: Any,
         tuple_child_nodes: list[_AnnotationInfoWithModelTree],
+        is_return: bool = False,
     ) -> Any:
         # Pass through if not a tuple. This handles:
         # 1. None values in union types like tuple[X, Y] | None
@@ -784,12 +790,15 @@ def check_types(
         for child_arg_value, child_annotation_model_tree in zip(
             arg_value, tuple_child_nodes
         ):
-            _check_arg_value(child_arg_value, child_annotation_model_tree)
+            _check_arg_value(
+                child_arg_value, child_annotation_model_tree, is_return
+            )
         return arg_value
 
     def _check_arg_value_against_list(
         arg_value: Any,
         list_child_node: _AnnotationInfoWithModelTree | None,
+        is_return: bool = False,
     ) -> Any:
         if not list_child_node:
             # List of no specific type
@@ -804,12 +813,13 @@ def check_types(
 
         # Check all children conform to the schema
         for x in arg_value:
-            _check_arg_value(x, list_child_node)
+            _check_arg_value(x, list_child_node, is_return)
         return arg_value
 
     def _check_arg_value_against_dict(
         arg_value: Any,
         dict_child_node: _AnnotationInfoWithModelTree | None,
+        is_return: bool = False,
     ) -> Any:
         if not dict_child_node:
             # Dict of no specific value type
@@ -824,37 +834,47 @@ def check_types(
 
         # Check all children conform to the schema
         for _, x in arg_value.items():
-            _check_arg_value(x, dict_child_node)
+            _check_arg_value(x, dict_child_node, is_return)
         return arg_value
 
     def _check_arg_value(
         arg_value: Any,
         annotation_model_tree: _AnnotationInfoWithModelTree,
+        is_return: bool = False,
     ) -> Any:
         if annotation_model_tree.annotation_info.origin == Union:
             return _check_arg_value_against_union(
-                arg_value, annotation_model_tree.children or []
+                arg_value,
+                annotation_model_tree.children or [],
+                is_return,
             )
         # NOTE: We use string literals for Tuple, List, and Dict here to prevent
         #       pyupgrade from (incorrectly) converting them to tuple, list, and dict.
         #       This is important because we want to match both list and List, for example.
         elif annotation_model_tree.annotation_info.origin in [tuple, "Tuple"]:
             return _check_arg_value_against_tuple(
-                arg_value, annotation_model_tree.children or []
+                arg_value,
+                annotation_model_tree.children or [],
+                is_return,
             )
         elif annotation_model_tree.annotation_info.origin in [list, "List"]:
             return _check_arg_value_against_list(
-                arg_value, annotation_model_tree.child_at_index(0)
+                arg_value,
+                annotation_model_tree.child_at_index(0),
+                is_return,
             )
         elif annotation_model_tree.annotation_info.origin in [dict, "Dict"]:
             return _check_arg_value_against_dict(
-                arg_value, annotation_model_tree.child_at_index(1)
+                arg_value,
+                annotation_model_tree.child_at_index(1),
+                is_return,
             )
         else:
             return _check_arg_value_against_model(
                 arg_value,
                 annotation_model_tree.dataframe_model,
                 annotation_model_tree.annotation_info,
+                is_return,
             )
 
     def _check_arg(arg_name: str, arg_value: Any) -> Any:
@@ -869,7 +889,11 @@ def check_types(
 
         annotation_model_tree = annotated_schema_models[arg_name]
 
-        return _check_arg_value(arg_value, annotation_model_tree)
+        # `to_format` only applies to the return value: input arguments must
+        # reach the wrapped function as dataframes, per their annotations.
+        return _check_arg_value(
+            arg_value, annotation_model_tree, is_return=arg_name == "return"
+        )
 
     sig = inspect.signature(wrapped)
 
