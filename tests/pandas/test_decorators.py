@@ -1944,3 +1944,121 @@ def test_get_fn_argnames_no_positional_args():
     assert _get_fn_argnames(keywords) == []
     # regression guard: self-exclusion semantics unchanged
     assert _get_fn_argnames(Widget.method) == ["x"]
+
+
+@pytest.mark.parametrize("obj_getter", [0, "df", None])
+def test_check_input_forwards_lazy(obj_getter) -> None:
+    """``lazy`` applies however the input object is selected.
+
+    Selecting the object by position validated eagerly, so a caller that asked
+    for collected errors got a single-error SchemaError instead.
+    """
+    schema = DataFrameSchema({"column1": Column(int, Check.gt(0))})
+    df = pd.DataFrame({"column1": [1, -1, -2]})
+
+    if obj_getter is None:
+        decorator = check_input(schema, lazy=True)
+    else:
+        decorator = check_input(schema, obj_getter, lazy=True)
+
+    @decorator
+    def transform(df):
+        return df
+
+    with pytest.raises(errors.SchemaErrors) as exc_info:
+        transform(df)
+    assert [e.schema.name for e in exc_info.value.schema_errors] == ["column1"]
+
+
+@pytest.mark.parametrize("obj_getter", [0, "df", None])
+def test_check_input_forwards_head(obj_getter) -> None:
+    """``head`` limits the validated rows for every object selector."""
+    schema = DataFrameSchema({"column1": Column(int, Check.gt(0))})
+    df = pd.DataFrame({"column1": [1, -1]})
+
+    if obj_getter is None:
+        decorator = check_input(schema, head=1)
+    else:
+        decorator = check_input(schema, obj_getter, head=1)
+
+    @decorator
+    def transform(df):
+        return df
+
+    pd.testing.assert_frame_equal(transform(df), df)
+
+
+def _outcome(obj_getter, schema, df, options):
+    """Run a decorated identity function and report how it ended."""
+
+    @check_input(schema, obj_getter, **options)
+    def transform(df):
+        return df
+
+    try:
+        return ("passed", transform(df).to_dict(orient="list"))
+    except Exception as exc:
+        return (type(exc).__name__, str(exc)[:200])
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        pytest.param({}, id="none"),
+        pytest.param({"head": 1}, id="head"),
+        pytest.param({"tail": 1}, id="tail"),
+        pytest.param({"sample": 1, "random_state": 0}, id="sample_seed_0"),
+        pytest.param({"sample": 1, "random_state": 3}, id="sample_seed_3"),
+        pytest.param({"lazy": True}, id="lazy"),
+    ],
+)
+def test_check_input_positional_getter_matches_the_others(options) -> None:
+    """Selecting the input by index must not change which options apply.
+
+    ``head``, ``tail``, ``sample``, ``random_state`` and ``lazy`` are forwarded
+    to ``validate`` when the input is selected by name, and were dropped when it
+    is selected by index. The default selector is left out of the comparison: it
+    reports the same failure through ``_handle_schema_error``, which prefixes the
+    function name onto the message.
+    """
+    schema = DataFrameSchema({"column1": Column(int, Check.gt(0))})
+    df = pd.DataFrame({"column1": [-1, 2, -3, 4]})
+    by_name = _outcome("df", schema, df, options)
+    assert _outcome(0, schema, df, options) == by_name
+
+
+def test_check_input_positional_getter_coerces_in_place() -> None:
+    """``inplace`` must be forwarded, not dropped, on the positional path.
+
+    The schema coerces ``column1`` to ``str``, so the caller's frame shows
+    whether validation happened in place.
+    """
+    schema = DataFrameSchema({"column1": Column(str, coerce=True)})
+
+    def dtype_after(obj_getter):
+        @check_input(schema, obj_getter, inplace=True)
+        def transform(df):
+            return str(df["column1"].dtype)
+
+        src = pd.DataFrame({"column1": [1, 2]})
+        return f"body={transform(src)} caller={src['column1'].dtype}"
+
+    assert dtype_after(0) == dtype_after("df") == "body=object caller=object"
+
+
+def test_check_input_positional_getter_forwards_sample_and_seed() -> None:
+    """``sample`` narrows the validated rows on the positional path too.
+
+    Sweeping across ``random_state`` values is what makes the two paths
+    distinguishable: whenever the drawn rows happen to be valid, validating the
+    whole frame still fails.
+    """
+    schema = DataFrameSchema({"column1": Column(int, Check.gt(0))})
+    df = pd.DataFrame({"column1": [-1, 2, -3, 4, 5, 6]})
+    by_index, by_name = {}, {}
+    for seed in range(12):
+        options = {"sample": 1, "random_state": seed}
+        by_index[seed] = _outcome(0, schema, df, options)[0]
+        by_name[seed] = _outcome("df", schema, df, options)[0]
+    assert set(by_index.values()) == {"passed", "SchemaError"}, by_index
+    assert by_index == by_name
